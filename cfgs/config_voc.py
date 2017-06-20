@@ -11,6 +11,9 @@ cfg.rpn_negative_iou_th = 0.3
 cfg.rpn_batch = 256
 cfg.rpn_fg_fraction = 0.5
 
+cfg.bbox_outside_weights = 
+cfg.bbox_inside_weights = 
+
 cfg.anchor_scales = (8, 16, 32)
 cfg.anchor_ratios = (0.5, 1, 2)
 cfg.anchor_num = 9

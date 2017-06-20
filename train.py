@@ -17,8 +17,6 @@ from cfgs.config import cfg
 
 from utils import proposal_layer
 
-TOTAL_BATCH_SIZE = 16
-
 class Model(ModelDesc):
 
     def __init__(self, mode):
@@ -34,10 +32,12 @@ class Model(ModelDesc):
         # 5. pay attention that target for fast rcnn part cannot be provided,
         #    since they are calculated based on the rpn output
         #    (selecting positive and negative samples from roi, which is output of rpn)
-        return [InputDesc(tf.uint8, [None, cfg.img_size, cfg.img_size, 3], 'input'),
-                InputDesc(tf.int32, [None], 'label')]
-
-
+        return [InputDesc(tf.uint8, [1, None, None, 3], 'image'),
+                InputDesc(tf.int32, [2], 'img_shape'),
+                InputDesc(tf.int32, [None, 4], 'gt_boxes'),
+                InputDesc(tf.int32, [None], 'gt_classes'),
+                InputDesc(tf.int32, [1, None, None, cfg.anchor_num], 'rpn_label'),
+                InputDesc(tf.int32, [1, None, None, cfg.anchor_num, 4], 'rpn_bbox_targets')]
 
     def _proposal_layer(self, rpn_class_prob, rpn_bbox_pred, name):
         with tf.variable_scope(name) as scope:
@@ -49,8 +49,23 @@ class Model(ModelDesc):
 
         return rois, rpn_scores
 
+    def _smooth_l1_loss(self, bbox_pred, bbox_targets, sigma=1.0, dim=[1]):
+        sigma_2 = sigma ** 2
+        box_diff = bbox_pred - bbox_targets
+        in_box_diff = cfg.bbox_inside_weights * box_diff
+        abs_in_box_diff = tf.abs(in_box_diff)
+        smoothL1_sign = tf.stop_gradient(tf.to_float(tf.less(abs_in_box_diff, 1. / sigma_2)))
+        in_loss_box = tf.pow(in_box_diff, 2) * (sigma_2 / 2.) * smoothL1_sign + \
+                      (abs_in_box_diff - (0.5 / sigma_2)) * (1. - smoothL1_sign)
+        out_loss_box = cfg.bbox_outside_weights * in_loss_box
+        loss_box = tf.reduce_mean(tf.reduce_sum(
+            out_loss_box,
+            axis=dim
+        ))
+        return loss_box
+
     def _build_graph(self, inputs):
-        image, label = inputs
+        image, height, width, gt_boxes, gt_classes, rpn_label, rpn_bbox_targets = inputs
         image = tf.cast(image, tf.float32) * (1.0 / 255)
 
         # Wrong mean/std are used for compatibility with pre-trained models.
@@ -143,8 +158,13 @@ class Model(ModelDesc):
                                kernel_shape=1,
                                'VALID')
 
+        rpn_cross_entropy = tf.reduce_mean(
+            tf.nn.sparse_softmax_cross_entropy_with_logits(logits=rpn_cls_score, labels=rpn_label))
 
-        rois, roi_scores = self._proposal_layer(rpn_cls_prob, rpn_bbox_pred, "rois")
+        rpn_loss_box = self._smooth_l1_loss(rpn_bbox_pred, rpn_bbox_targets, rpn_bbox_inside_weights,
+                                            rpn_bbox_outside_weights, sigma=sigma_rpn, dim=[1, 2, 3])
+
+        # rois, roi_scores = self._proposal_layer(rpn_cls_prob, rpn_bbox_pred, "rois")
 
         # if is_training:
         #     rois, roi_scores = self._proposal_layer(rpn_cls_prob, rpn_bbox_pred, "rois")

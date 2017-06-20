@@ -17,6 +17,8 @@ from cfgs.config import cfg
 from utils import bbox_transform
 from generate_anchors import generate_anchors_pre
 
+import pdb
+
 class Box():
     def __init__(self, p1, p2, p3, p4, mode='XYWH'):
         if mode == 'XYWH':
@@ -197,6 +199,9 @@ class Data(RNGDataFlow):
         labels = np.empty((len(inds_inside),), dtype=np.float32)
         labels.fill(-1)
 
+        print(gt_argmax_overlaps.shape)
+        print(np.where(max_overlaps >= cfg.rpn_positive_iou_th)[0].shape)
+
         # assign positive and negative ious
         labels[max_overlaps < cfg.rpn_negative_iou_th] = 0
         labels[gt_argmax_overlaps] = 1
@@ -239,14 +244,14 @@ class Data(RNGDataFlow):
         # bbox_inside_weights = _unmap(bbox_inside_weights, total_anchors, inds_inside, fill=0)
         # bbox_outside_weights = _unmap(bbox_outside_weights, total_anchors, inds_inside, fill=0)
 
-
         # labels
-        labels = labels.reshape((1, feat_height, feat_width, cfg.anchor_num)).transpose(0, 3, 1, 2)
-        labels = labels.reshape((1, 1, cfg.anchor_num * feat_height, feat_width))
+        labels = labels.reshape((1, feat_height, feat_width, cfg.anchor_num))
+        # labels = labels.reshape((1, feat_height, feat_width, cfg.anchor_num)).transpose(0, 3, 1, 2)
+        # labels = labels.reshape((1, 1, cfg.anchor_num * feat_height, feat_width))
         rpn_labels = labels
 
         # bbox_targets
-        bbox_targets = bbox_targets.reshape((1, feat_height, feat_width, cfg.anchor_num * 4))
+        bbox_targets = bbox_targets.reshape((1, feat_height, feat_width, cfg.anchor_num, 4))
         rpn_bbox_targets = bbox_targets
 
         # bbox_inside_weights
@@ -257,7 +262,16 @@ class Data(RNGDataFlow):
         # bbox_outside_weights = bbox_outside_weights.reshape((1, feat_height, feat_width, cfg.anchor_num * 4))
         # rpn_bbox_outside_weights = bbox_outside_weights
 
-        return [image, [height, width], gt_boxes, gt_classes, rpn_labels, rpn_bbox_targets]
+        # return [image, [height, width], gt_boxes, gt_classes, rpn_labels, rpn_bbox_targets, all_anchors]
+        image = np.expand_dims(image, 0)
+        img_shape = np.asarray([height, width])
+        print(image.shape)
+        print(img_shape.shape)
+        print(gt_boxes.shape)
+        print(gt_classes.shape)
+        print(rpn_labels.shape)
+        print(rpn_bbox_targets.shape)
+        return [image, img_shape, gt_boxes, gt_classes, rpn_labels, rpn_bbox_targets]
 
     def get_data(self):
         idxs = np.arange(len(self.imglist))
