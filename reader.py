@@ -109,10 +109,8 @@ def bbox_overlaps(boxes, query_boxes):
     return overlaps
 
 class Data(RNGDataFlow):
-    def __init__(self, filename_list, shuffle, flip, affine_trans, use_multi_scale, period):
+    def __init__(self, filename_list, shuffle, flip):
         self.filename_list = filename_list
-        self.use_multi_scale = use_multi_scale
-        self.period = period
 
         if isinstance(filename_list, list) == False:
             filename_list = [filename_list]
@@ -142,10 +140,10 @@ class Data(RNGDataFlow):
         img_scale = float(cfg.target_size) / float(img_size_min)
 
         # resize the image to make the shortest length 600 pixel
-        image = cv2.resize(image, None, None, fx=im_scale, fy=im_scale,
+        image = cv2.resize(image, None, None, fx=img_scale, fy=img_scale,
                          interpolation=cv2.INTER_LINEAR)
         height, width, _ = image.shape
-        feature_height, feature_width = np.asarray([height, width]) / cfg.feat_stride
+        feat_height, feat_width = np.ceil(np.asarray([height, width]) / cfg.feat_stride).astype(int)
 
         # generate gt boxes, including coordinates and classes
         i = 1
@@ -154,7 +152,7 @@ class Data(RNGDataFlow):
         while i < len(record):
             # make coordinates of gt boxes from 1-based to 0-based
             # all gt boxes should be scaled
-            xmin, ymin, xmax, ymax = (record[i:i+4] - 1) * im_scale
+            xmin, ymin, xmax, ymax = [(ele - 1) * img_scale for ele in record[i:i+4]]
             class_num = int(record[i + 4])
 
             gt_boxes.append([xmin, ymin, xmax, ymax])
@@ -166,7 +164,9 @@ class Data(RNGDataFlow):
         gt_classes = np.asarray(gt_classes)
 
         # generate anchors, only keep anchors inside the image
-        all_anchors = generate_anchors_pre(feat_height, feat_width, cfg.feat_stride, anchor_scales=(8,16,32), anchor_ratios=(0.5,1,2))
+        all_anchors, _ = generate_anchors_pre(feat_height, feat_width, cfg.feat_stride, anchor_scales=(8,16,32), anchor_ratios=(0.5,1,2))
+
+        total_anchors = all_anchors.shape[0]
 
         _allowed_border = 0
         inds_inside = np.where(
@@ -236,8 +236,8 @@ class Data(RNGDataFlow):
 
         labels = _unmap(labels, total_anchors, inds_inside, fill=-1)
         bbox_targets = _unmap(bbox_targets, total_anchors, inds_inside, fill=0)
-        bbox_inside_weights = _unmap(bbox_inside_weights, total_anchors, inds_inside, fill=0)
-        bbox_outside_weights = _unmap(bbox_outside_weights, total_anchors, inds_inside, fill=0)
+        # bbox_inside_weights = _unmap(bbox_inside_weights, total_anchors, inds_inside, fill=0)
+        # bbox_outside_weights = _unmap(bbox_outside_weights, total_anchors, inds_inside, fill=0)
 
 
         # labels

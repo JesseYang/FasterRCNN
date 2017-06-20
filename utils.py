@@ -3,9 +3,6 @@ import numpy as np
 from cfgs.config import cfg
 
 
-from model.bbox_transform import bbox_transform_inv, clip_boxes
-from model.nms_wrapper import nms
-
 def bbox_transform(ex_rois, gt_rois):
   ex_widths = ex_rois[:, 2] - ex_rois[:, 0] + 1.0
   ex_heights = ex_rois[:, 3] - ex_rois[:, 1] + 1.0
@@ -97,7 +94,8 @@ def proposal_layer(rpn_cls_prob, rpn_bbox_pred, img_shape):
     scores = scores[order]
 
     # Non-maximal suppression
-    keep = nms(np.hstack((proposals, scores)), cfg.nms_thresh)
+    # keep = nms(np.hstack((proposals, scores)), cfg.nms_thresh)
+    keep = np.arange(100)
 
     # Pick th top region proposals after NMS
     if cfg.post_nms_topN > 0:
