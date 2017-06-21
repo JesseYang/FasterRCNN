@@ -4,57 +4,94 @@ from cfgs.config import cfg
 
 
 def bbox_transform(ex_rois, gt_rois):
-  ex_widths = ex_rois[:, 2] - ex_rois[:, 0] + 1.0
-  ex_heights = ex_rois[:, 3] - ex_rois[:, 1] + 1.0
-  ex_ctr_x = ex_rois[:, 0] + 0.5 * ex_widths
-  ex_ctr_y = ex_rois[:, 1] + 0.5 * ex_heights
+    ex_widths = ex_rois[:, 2] - ex_rois[:, 0] + 1.0
+    ex_heights = ex_rois[:, 3] - ex_rois[:, 1] + 1.0
+    ex_ctr_x = ex_rois[:, 0] + 0.5 * ex_widths
+    ex_ctr_y = ex_rois[:, 1] + 0.5 * ex_heights
 
-  gt_widths = gt_rois[:, 2] - gt_rois[:, 0] + 1.0
-  gt_heights = gt_rois[:, 3] - gt_rois[:, 1] + 1.0
-  gt_ctr_x = gt_rois[:, 0] + 0.5 * gt_widths
-  gt_ctr_y = gt_rois[:, 1] + 0.5 * gt_heights
+    gt_widths = gt_rois[:, 2] - gt_rois[:, 0] + 1.0
+    gt_heights = gt_rois[:, 3] - gt_rois[:, 1] + 1.0
+    gt_ctr_x = gt_rois[:, 0] + 0.5 * gt_widths
+    gt_ctr_y = gt_rois[:, 1] + 0.5 * gt_heights
 
-  targets_dx = (gt_ctr_x - ex_ctr_x) / ex_widths
-  targets_dy = (gt_ctr_y - ex_ctr_y) / ex_heights
-  targets_dw = np.log(gt_widths / ex_widths)
-  targets_dh = np.log(gt_heights / ex_heights)
+    targets_dx = (gt_ctr_x - ex_ctr_x) / ex_widths
+    targets_dy = (gt_ctr_y - ex_ctr_y) / ex_heights
+    targets_dw = np.log(gt_widths / ex_widths)
+    targets_dh = np.log(gt_heights / ex_heights)
 
-  targets = np.vstack(
-    (targets_dx, targets_dy, targets_dw, targets_dh)).transpose()
-  return targets
+    targets = np.vstack(
+        (targets_dx, targets_dy, targets_dw, targets_dh)).transpose()
+    return targets
 
+def _compute_targets(ex_rois, gt_rois, labels):
+    """Compute bounding-box regression targets for an image."""
+
+    assert ex_rois.shape[0] == gt_rois.shape[0]
+    assert ex_rois.shape[1] == 4
+    assert gt_rois.shape[1] == 4
+
+    targets = bbox_transform(ex_rois, gt_rois)
+    # if cfg.TRAIN.BBOX_NORMALIZE_TARGETS_PRECOMPUTED:
+    #     # Optionally normalize targets by a precomputed mean and stdev
+    #     targets = ((targets - np.array(cfg.TRAIN.BBOX_NORMALIZE_MEANS))
+    #               / np.array(cfg.TRAIN.BBOX_NORMALIZE_STDS))
+    return np.hstack((labels[:, np.newaxis], targets)).astype(np.float32, copy=False)
+
+def _get_bbox_regression_labels(bbox_target_data, num_classes):
+    """Bounding-box regression targets (bbox_target_data) are stored in a
+    compact form N x (class, tx, ty, tw, th)
+
+    This function expands those targets into the 4-of-4*K representation used
+    by the network (i.e. only one class has non-zero targets).
+
+    Returns:
+        bbox_target (ndarray): N x 4K blob of regression targets
+        bbox_inside_weights (ndarray): N x 4K blob of loss weights
+    """
+
+    clss = bbox_target_data[:, 0]
+    bbox_targets = np.zeros((clss.size, 4 * num_classes), dtype=np.float32)
+    bbox_inside_weights = np.zeros(bbox_targets.shape, dtype=np.float32)
+    inds = np.where(clss > 0)[0]
+    for ind in inds:
+        cls = clss[ind]
+        start = int(4 * cls)
+        end = start + 4
+        bbox_targets[ind, start:end] = bbox_target_data[ind, 1:]
+        bbox_inside_weights[ind, start:end] = cfg.bbox_inside_weights
+    return bbox_targets, bbox_inside_weights
 
 def bbox_transform_inv(boxes, deltas):
-  if boxes.shape[0] == 0:
-    return np.zeros((0, deltas.shape[1]), dtype=deltas.dtype)
+    if boxes.shape[0] == 0:
+        return np.zeros((0, deltas.shape[1]), dtype=deltas.dtype)
 
-  boxes = boxes.astype(deltas.dtype, copy=False)
-  widths = boxes[:, 2] - boxes[:, 0] + 1.0
-  heights = boxes[:, 3] - boxes[:, 1] + 1.0
-  ctr_x = boxes[:, 0] + 0.5 * widths
-  ctr_y = boxes[:, 1] + 0.5 * heights
+    boxes = boxes.astype(deltas.dtype, copy=False)
+    widths = boxes[:, 2] - boxes[:, 0] + 1.0
+    heights = boxes[:, 3] - boxes[:, 1] + 1.0
+    ctr_x = boxes[:, 0] + 0.5 * widths
+    ctr_y = boxes[:, 1] + 0.5 * heights
 
-  dx = deltas[:, 0::4]
-  dy = deltas[:, 1::4]
-  dw = deltas[:, 2::4]
-  dh = deltas[:, 3::4]
+    dx = deltas[:, 0::4]
+    dy = deltas[:, 1::4]
+    dw = deltas[:, 2::4]
+    dh = deltas[:, 3::4]
   
-  pred_ctr_x = dx * widths[:, np.newaxis] + ctr_x[:, np.newaxis]
-  pred_ctr_y = dy * heights[:, np.newaxis] + ctr_y[:, np.newaxis]
-  pred_w = np.exp(dw) * widths[:, np.newaxis]
-  pred_h = np.exp(dh) * heights[:, np.newaxis]
+    pred_ctr_x = dx * widths[:, np.newaxis] + ctr_x[:, np.newaxis]
+    pred_ctr_y = dy * heights[:, np.newaxis] + ctr_y[:, np.newaxis]
+    pred_w = np.exp(dw) * widths[:, np.newaxis]
+    pred_h = np.exp(dh) * heights[:, np.newaxis]
 
-  pred_boxes = np.zeros(deltas.shape, dtype=deltas.dtype)
-  # x1
-  pred_boxes[:, 0::4] = pred_ctr_x - 0.5 * pred_w
-  # y1
-  pred_boxes[:, 1::4] = pred_ctr_y - 0.5 * pred_h
-  # x2
-  pred_boxes[:, 2::4] = pred_ctr_x + 0.5 * pred_w
-  # y2
-  pred_boxes[:, 3::4] = pred_ctr_y + 0.5 * pred_h
+    pred_boxes = np.zeros(deltas.shape, dtype=deltas.dtype)
+    # x1
+    pred_boxes[:, 0::4] = pred_ctr_x - 0.5 * pred_w
+    # y1
+    pred_boxes[:, 1::4] = pred_ctr_y - 0.5 * pred_h
+    # x2
+    pred_boxes[:, 2::4] = pred_ctr_x + 0.5 * pred_w
+    # y2
+    pred_boxes[:, 3::4] = pred_ctr_y + 0.5 * pred_h
 
-  return pred_boxes
+    return pred_boxes
 
 def bbox_overlaps(boxes, query_boxes):
     """
@@ -94,19 +131,19 @@ def bbox_overlaps(boxes, query_boxes):
     return overlaps
 
 def clip_boxes(boxes, img_shape):
-  """
-  Clip boxes to image boundaries.
-  """
+    """
+    Clip boxes to image boundaries.
+    """
 
-  # x1 >= 0
-  boxes[:, 0::4] = np.maximum(np.minimum(boxes[:, 0::4], img_shape[1] - 1), 0)
-  # y1 >= 0
-  boxes[:, 1::4] = np.maximum(np.minimum(boxes[:, 1::4], img_shape[0] - 1), 0)
-  # x2 < im_shape[1]
-  boxes[:, 2::4] = np.maximum(np.minimum(boxes[:, 2::4], img_shape[1] - 1), 0)
-  # y2 < im_shape[0]
-  boxes[:, 3::4] = np.maximum(np.minimum(boxes[:, 3::4], img_shape[0] - 1), 0)
-  return boxes
+    # x1 >= 0
+    boxes[:, 0::4] = np.maximum(np.minimum(boxes[:, 0::4], img_shape[1] - 1), 0)
+    # y1 >= 0
+    boxes[:, 1::4] = np.maximum(np.minimum(boxes[:, 1::4], img_shape[0] - 1), 0)
+    # x2 < im_shape[1]
+    boxes[:, 2::4] = np.maximum(np.minimum(boxes[:, 2::4], img_shape[1] - 1), 0)
+    # y2 < im_shape[0]
+    boxes[:, 3::4] = np.maximum(np.minimum(boxes[:, 3::4], img_shape[0] - 1), 0)
+    return boxes
 
 def nms(dets, thresh):
     x1 = dets[:, 0]
@@ -207,14 +244,14 @@ def proposal_target_layer(rpn_rois, rpn_scores, gt_boxes, gt_classes):
         all_rois, all_scores, gt_boxes, gt_classes, fg_rois_per_image,
         rois_per_image)
 
-  rois = rois.reshape(-1, 5)
-  roi_scores = roi_scores.reshape(-1)
-  labels = labels.reshape(-1, 1)
-  bbox_targets = bbox_targets.reshape(-1, _num_classes * 4)
-  bbox_inside_weights = bbox_inside_weights.reshape(-1, _num_classes * 4)
-  bbox_outside_weights = np.array(bbox_inside_weights > 0).astype(np.float32)
+    rois = rois.reshape(-1, 5)
+    roi_scores = roi_scores.reshape(-1)
+    labels = labels.reshape(-1, 1)
+    bbox_targets = bbox_targets.reshape(-1, _num_classes * 4)
+    bbox_inside_weights = bbox_inside_weights.reshape(-1, _num_classes * 4)
+    bbox_outside_weights = np.array(bbox_inside_weights > 0).astype(np.float32)
 
-  return rois, roi_scores, labels, bbox_targets, bbox_inside_weights, bbox_outside_weights
+    return rois, roi_scores, labels, bbox_targets, bbox_inside_weights, bbox_outside_weights
 
 
 
@@ -264,10 +301,8 @@ def _sample_rois(all_rois, all_scores, gt_boxes, gt_classes, fg_rois_per_image, 
     rois = all_rois[keep_inds]
     roi_scores = all_scores[keep_inds]
 
-  bbox_target_data = _compute_targets(
-    rois[:, 1:5], gt_boxes[gt_assignment[keep_inds], :4], labels)
+    bbox_target_data = _compute_targets(rois, gt_boxes[gt_assignment[keep_inds]], labels)
 
-  bbox_targets, bbox_inside_weights = \
-    _get_bbox_regression_labels(bbox_target_data, num_classes)
+    bbox_targets, bbox_inside_weights = _get_bbox_regression_labels(bbox_target_data, num_classes)
 
-  return labels, rois, roi_scores, bbox_targets, bbox_inside_weights
+    return labels, rois, roi_scores, bbox_targets, bbox_inside_weights

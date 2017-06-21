@@ -41,7 +41,7 @@ class Model(ModelDesc):
                 InputDesc(tf.int32, [1, None, None, cfg.anchor_num, 4], 'rpn_bbox_targets'),
                 InputDesc(tf.uint8, [None, 4], "anchors")]
 
-    def _smooth_l1_loss(self, bbox_pred, bbox_targets, bbox_label, sigma=1.0, dim=[1]):
+    def _smooth_l1_loss(self, bbox_pred, bbox_targets, bbox_label=None, sigma=1.0, dim=[1]):
         sigma_2 = sigma ** 2
         box_diff = bbox_pred - bbox_targets
         box_diff = bbox_label * box_diff
@@ -64,7 +64,7 @@ class Model(ModelDesc):
         image_mean = tf.constant([0.485, 0.456, 0.406], dtype=tf.float32)
         image_std = tf.constant([0.229, 0.224, 0.225], dtype=tf.float32)
         image = (image - image_mean) / image_std
-        image = tf.transpose(image, [0, 3, 1, 2])
+        # image = tf.transpose(image, [0, 3, 1, 2])
 
         def shortcut(l, n_in, n_out, stride):
             if n_in != n_out:
@@ -122,7 +122,7 @@ class Model(ModelDesc):
         # share part
         with argscope(Conv2D, nl=tf.identity, use_bias=False,
                       W_init=variance_scaling_initializer(mode='FAN_OUT')), \
-                argscope([Conv2D, MaxPooling, GlobalAvgPooling, BatchNorm], data_format='NCHW'):
+                argscope([Conv2D, MaxPooling, GlobalAvgPooling, BatchNorm], data_format='NHWC'):
             features = (LinearWrap(image)
                         .Conv2D('conv0', 64, 7, stride=2, nl=BNReLU)
                         .MaxPooling('pool0', shape=3, stride=2, padding='SAME')
@@ -140,7 +140,7 @@ class Model(ModelDesc):
                                rpn,
                                channel=cfg.anchor_num * 2,
                                kernel_shape=1,
-                               'VALID')
+                               padding='VALID')
         # from 1 x feat_height x feat_width x (2 x anchor_num) to (feat_height x feat_width x anchor_num) x 2
         rpn_cls_score = tf.reshape(rpn_cls_score, [-1, 2])
 
@@ -149,7 +149,7 @@ class Model(ModelDesc):
                                rpn,
                                channel=cfg.anchor_num * 4,
                                kernel_shape=1,
-                               'VALID')
+                               padding='VALID')
         _, feat_height, feat_width, _ = tf.shape(rpn_bbox_pred)
         # from 1 x feat_height x feat_width x (4 x anchor_num) to 1 x feat_height x feat_width x anchor_num x 4
         rpn_bbox_pred = tf.reshape(rpn_bbox_pred, [1, feat_height, feat_width, cfg.anchor_num, 4])
@@ -168,7 +168,7 @@ class Model(ModelDesc):
         rpn_bbox_label = tf.tile(rpn_label, [1, 1, 1, 4])
         rpn_bbox_label = tf.reshape(rpn_bbox_label, (1, feat_height, feat_width, cfg.anchor_num, 4))
         rpn_bbox_label = tf.cast(rpn_bbox_label == 1, tf.float32)
-        rpn_loss_box = self._smooth_l1_loss(rpn_bbox_pred, rpn_bbox_targets, rpn_bbox_label, sigma=sigma_rpn, dim=[1, 2, 3, 4])
+        rpn_loss_box = self._smooth_l1_loss(rpn_bbox_pred, rpn_bbox_targets, bbox_label=rpn_bbox_label, sigma=sigma_rpn, dim=[1, 2, 3, 4])
         rpn_loss_box = rpn_loss_box / cfg.rpn_reg_weight
 
         # get roi proposals
@@ -179,47 +179,52 @@ class Model(ModelDesc):
         rois.set_shape([None, 4])
         rpn_scores.set_shape([None, 1])
 
-        # sample from roi proposals to get targets for fast rcnn part
-        with tf.variable_scope(name) as scope:
+        # sample from roi proposals to get minibatch and targets for fast rcnn part
+        with tf.variable_scope("rpn_rois") as scope:
             rois, roi_scores, labels, bbox_targets, bbox_inside_weights, bbox_outside_weights = tf.py_func(
                 proposal_target_layer,
                 [rois, roi_scores, gt_boxes, gt_classes],
                 [tf.float32, tf.float32, tf.float32, tf.float32, tf.float32, tf.float32])
 
-        # rois, roi_scores = self._proposal_layer(rpn_cls_prob, rpn_bbox_pred, "rois")
+        # instead of doing RoI pooling, do crop and resize
+        with tf.variable_scope("crop_and_resize") as scope:
+            batch_ids = tf.squeeze(tf.slice(rois, [0, 0], [-1, 1], name="batch_id"), [1])
+            # Get the normalized coordinates of bboxes
+            feature_shape = tf.shape(features)
+            height = (tf.to_float(feature_shape[1]) - 1.) * np.float32(self._feat_stride[0])
+            width = (tf.to_float(feature_shape[2]) - 1.) * np.float32(self._feat_stride[0])
+            x1 = tf.slice(rois, [0, 1], [-1, 1], name="x1") / width
+            y1 = tf.slice(rois, [0, 2], [-1, 1], name="y1") / height
+            x2 = tf.slice(rois, [0, 3], [-1, 1], name="x2") / width
+            y2 = tf.slice(rois, [0, 4], [-1, 1], name="y2") / height
+            # Won't be backpropagated to rois anyway, but to save time
+            bboxes = tf.stop_gradient(tf.concat([y1, x1, y2, x2], 1))
+            crops = tf.image.crop_and_resize(features, bboxes, tf.to_int32(batch_ids), [cfg.pooling_sizes, cfg.pooling_sizes],
+                                             name="crops")
 
-        # if is_training:
-        #     rois, roi_scores = self._proposal_layer(rpn_cls_prob, rpn_bbox_pred, "rois")
-        #     rpn_labels = self._anchor_target_layer(rpn_cls_score, "anchor")
-        #     # Try to have a determinestic order for the computing graph, for reproducibility
-        #     with tf.control_dependencies([rpn_labels]):
-        #         rois, _ = self._proposal_target_layer(rois, roi_scores, "rpn_rois")
-        # else:
-        #     if cfg.TEST.MODE == 'nms':
-        #         rois, _ = self._proposal_layer(rpn_cls_prob, rpn_bbox_pred, "rois")
-        #     elif cfg.TEST.MODE == 'top':
-        #         rois, _ = self._proposal_top_layer(rpn_cls_prob, rpn_bbox_pred, "rois")
-        #     else:
-        #         raise NotImplementedError
+        # last conv block for resnet
+        with argscope(Conv2D, nl=tf.identity, use_bias=False,
+                      W_init=variance_scaling_initializer(mode='FAN_OUT')), \
+                argscope([Conv2D, MaxPooling, GlobalAvgPooling, BatchNorm], data_format='NHWC'):
+            features = (LinearWrap(features)
+                        .apply(layer, 'group3', block_func, 512, defs[3], 1)
+                        .BNReLU('bnlast')
+                        .GlobalAvgPooling('gap')())
 
+        # outputs
+        cls_score = FullyConnected("cls_score", cfg.n_classes, nl=tf.identity)
+        bbox_pred = FullyConnected("bbox_pred", cfg.n_classes * 4, nl=tf.identity)
 
-        # rcnn part
+        cross_entropy = tf.reduce_mean(
+            tf.nn.sparse_softmax_cross_entropy_with_logits(
+                logits=tf.reshape(cls_score, [-1, cfg.n_classes]), labels=label))
 
+        bbox_label = tf.tile(label, [4])
+        bbox_label = tf.reshape(bbox_label, (-1, 4))
+        bbox_label = tf.cast(bbox_label > 0, tf.float32)
+        loss_box = self._smooth_l1_loss(bbox_pred, bbox_targets, bbox_label=bbox_label)
 
-
-
-
-        prob = tf.nn.softmax(logits, name='output')
-        prob = tf.identity(prob, name="NETWORK_OUTPUT")
-
-        loss = tf.nn.sparse_softmax_cross_entropy_with_logits(logits=logits, labels=label)
-        loss = tf.reduce_mean(loss, name='xentropy-loss')
-
-        wrong = prediction_incorrect(logits, label, 1, name='wrong-top1')
-        add_moving_summary(tf.reduce_mean(wrong, name='train-error-top1'))
-
-        wrong = prediction_incorrect(logits, label, 5, name='wrong-top5')
-        add_moving_summary(tf.reduce_mean(wrong, name='train-error-top5'))
+        loss = rpn_loss_box + rpn_cross_entropy + loss_box + cross_entropy
 
         wd_cost = regularize_cost('.*/W', l2_regularizer(cfg.weight_decay), name='l2_regularize_loss')
         add_moving_summary(loss, wd_cost)
@@ -234,11 +239,10 @@ def get_data(train_or_test):
     isTrain = train_or_test == 'train'
 
     filename_list = cfg.train_list if isTrain else cfg.test_list
-    ds = Data(filename_list)
+    ds = Data(filename_list, shuffle=isTrain, flip=isTrain)
 
     if isTrain:
         augmentors = [
-            imgaug.RandomCrop(crop_shape=448),
             imgaug.RandomOrderAug(
                 [imgaug.Brightness(30, clip=False),
                  imgaug.Contrast((0.8, 1.2), clip=False),
@@ -253,18 +257,16 @@ def get_data(train_or_test):
                                      dtype='float32')[::-1, ::-1]
                                  )]),
             imgaug.Clip(),
-            imgaug.Flip(horiz=True),
             imgaug.ToUint8()
         ]
     else:
         augmentors = [
-            imgaug.RandomCrop(crop_shape=cfg.img_size),
             imgaug.ToUint8()
         ]
     ds = AugmentImageComponent(ds, augmentors)
     if isTrain:
         ds = PrefetchDataZMQ(ds, min(6, multiprocessing.cpu_count()))
-    ds = BatchData(ds, BATCH_SIZE, remainder=not isTrain)
+    # ds = BatchData(ds, BATCH_SIZE, remainder=not isTrain)
     return ds
 
 
@@ -276,14 +278,11 @@ def get_config():
         dataflow=dataset_train,
         callbacks=[
             ModelSaver(),
-            InferenceRunner(dataset_val, [
-                ClassificationError('wrong-top1', 'val-error-top1'),
-                ClassificationError('wrong-top5', 'val-error-top5')]),
             ScheduledHyperParamSetter('learning_rate',
                                       [(0, 1e-2), (30, 3e-3), (60, 1e-3), (85, 1e-4), (95, 1e-5)]),
             HumanHyperParamSetter('learning_rate'),
         ],
-        model=Model(),
+        model=Model("train"),
         max_epoch=110,
     )
 
@@ -291,7 +290,6 @@ def get_config():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpu', help='comma separated list of GPU(s) to use.', default='0')
-    parser.add_argument('--batch_size', required=True)
     parser.add_argument('--load', help='load model')
     args = parser.parse_args()
 
@@ -299,8 +297,8 @@ if __name__ == '__main__':
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
 
     assert args.gpu is not None, "Need to specify a list of gpu for training!"
-    NR_GPU = len(args.gpu.split(','))
-    BATCH_SIZE = int(args.batch_size) // NR_GPU
+    # NR_GPU = len(args.gpu.split(','))
+    # BATCH_SIZE = int(args.batch_size) // NR_GPU
 
     logger.auto_set_dir()
     config = get_config()
