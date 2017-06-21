@@ -3,3 +3,4 @@
 .ipynb_checkpoints
 VOCdevkit
 *.npy
+train_log

@@ -163,8 +163,8 @@ class Data(RNGDataFlow):
         labels = np.empty((len(inds_inside),), dtype=np.float32)
         labels.fill(-1)
 
-        print(gt_argmax_overlaps.shape)
-        print(np.where(max_overlaps >= cfg.rpn_positive_iou_th)[0].shape)
+        # print(gt_argmax_overlaps.shape)
+        # print(np.where(max_overlaps >= cfg.rpn_positive_iou_th)[0].shape)
 
         # assign positive and negative ious
         labels[max_overlaps < cfg.rpn_negative_iou_th] = 0
@@ -229,12 +229,12 @@ class Data(RNGDataFlow):
         # return [image, [height, width], gt_boxes, gt_classes, rpn_labels, rpn_bbox_targets, all_anchors]
         image = np.expand_dims(image, 0)
         img_shape = np.asarray([height, width])
-        print(image.shape)
-        print(img_shape.shape)
-        print(gt_boxes.shape)
-        print(gt_classes.shape)
-        print(rpn_labels.shape)
-        print(rpn_bbox_targets.shape)
+        # print(image.shape)
+        # print(img_shape.shape)
+        # print(gt_boxes.shape)
+        # print(gt_classes.shape)
+        # print(rpn_labels.shape)
+        # print(rpn_bbox_targets.shape)
         return [image, img_shape, gt_boxes, gt_classes, rpn_labels, rpn_bbox_targets, all_anchors]
 
     def get_data(self):

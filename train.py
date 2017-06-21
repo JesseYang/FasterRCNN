@@ -38,7 +38,7 @@ class Model(ModelDesc):
                 InputDesc(tf.int32, [None, 4], 'gt_boxes'),
                 InputDesc(tf.int32, [None], 'gt_classes'),
                 InputDesc(tf.int32, [1, None, None, cfg.anchor_num], 'rpn_label'),
-                InputDesc(tf.int32, [1, None, None, cfg.anchor_num, 4], 'rpn_bbox_targets'),
+                InputDesc(tf.float32, [1, None, None, cfg.anchor_num, 4], 'rpn_bbox_targets'),
                 InputDesc(tf.uint8, [None, 4], "anchors")]
 
     def _smooth_l1_loss(self, bbox_pred, bbox_targets, bbox_label=None, sigma=1.0, dim=[1]):
@@ -56,7 +56,10 @@ class Model(ModelDesc):
         return loss_box
 
     def _build_graph(self, inputs):
-        image, height, width, gt_boxes, gt_classes, rpn_label, rpn_bbox_targets, anchors = inputs
+        # image, height, width, gt_boxes, gt_classes, rpn_label, rpn_bbox_targets, anchors = inputs
+        image, img_shape, gt_boxes, gt_classes, rpn_label, rpn_bbox_targets, anchors = inputs
+        height = img_shape[0]
+        width = img_shape[1]
         image = tf.cast(image, tf.float32) * (1.0 / 255)
 
         # Wrong mean/std are used for compatibility with pre-trained models.
@@ -138,7 +141,7 @@ class Model(ModelDesc):
 
         rpn_cls_score = Conv2D('rpn_cls_score',
                                rpn,
-                               channel=cfg.anchor_num * 2,
+                               out_channel=cfg.anchor_num * 2,
                                kernel_shape=1,
                                padding='VALID')
         # from 1 x feat_height x feat_width x (2 x anchor_num) to (feat_height x feat_width x anchor_num) x 2
@@ -147,10 +150,12 @@ class Model(ModelDesc):
         rpn_cls_prob = tf.nn.softmax(rpn_cls_score, name='rpn_cls_prob', dim=1)
         rpn_bbox_pred = Conv2D("rpn_bbox_pred",
                                rpn,
-                               channel=cfg.anchor_num * 4,
+                               out_channel=cfg.anchor_num * 4,
                                kernel_shape=1,
                                padding='VALID')
-        _, feat_height, feat_width, _ = tf.shape(rpn_bbox_pred)
+        temp_shape = tf.shape(rpn_bbox_pred)
+        feat_height = temp_shape[1]
+        feat_width = temp_shape[2]
         # from 1 x feat_height x feat_width x (4 x anchor_num) to 1 x feat_height x feat_width x anchor_num x 4
         rpn_bbox_pred = tf.reshape(rpn_bbox_pred, [1, feat_height, feat_width, cfg.anchor_num, 4])
 
@@ -168,16 +173,16 @@ class Model(ModelDesc):
         rpn_bbox_label = tf.tile(rpn_label, [1, 1, 1, 4])
         rpn_bbox_label = tf.reshape(rpn_bbox_label, (1, feat_height, feat_width, cfg.anchor_num, 4))
         rpn_bbox_label = tf.cast(rpn_bbox_label == 1, tf.float32)
-        rpn_loss_box = self._smooth_l1_loss(rpn_bbox_pred, rpn_bbox_targets, bbox_label=rpn_bbox_label, sigma=sigma_rpn, dim=[1, 2, 3, 4])
+        rpn_loss_box = self._smooth_l1_loss(rpn_bbox_pred, rpn_bbox_targets, bbox_label=rpn_bbox_label, sigma=3.0, dim=[1, 2, 3, 4])
         rpn_loss_box = rpn_loss_box / cfg.rpn_reg_weight
 
         # get roi proposals
         with tf.variable_scope("rois") as scope:
-            rois, rpn_scores = tf.py_func(proposal_layer,
+            rois, roi_scores = tf.py_func(proposal_layer,
                                           [rpn_cls_prob, rpn_bbox_pred, height, width, anchors],
                                           [tf.float32, tf.float32])
         rois.set_shape([None, 4])
-        rpn_scores.set_shape([None, 1])
+        roi_scores.set_shape([None, 1])
 
         # sample from roi proposals to get minibatch and targets for fast rcnn part
         with tf.variable_scope("rpn_rois") as scope:
@@ -186,43 +191,56 @@ class Model(ModelDesc):
                 [rois, roi_scores, gt_boxes, gt_classes],
                 [tf.float32, tf.float32, tf.float32, tf.float32, tf.float32, tf.float32])
 
+        rois.set_shape([cfg.rcnn_batch_size, 4])
+        roi_scores.set_shape([cfg.rcnn_batch_size])
+        labels.set_shape([cfg.rcnn_batch_size])
+        bbox_targets.set_shape([cfg.rcnn_batch_size, cfg.n_classes * 4])
+        bbox_inside_weights.set_shape([cfg.rcnn_batch_size, cfg.n_classes * 4])
+        bbox_outside_weights.set_shape([cfg.rcnn_batch_size, cfg.n_classes * 4])
+
+        labels = tf.to_int32(labels, name="to_int32")
+
+
         # instead of doing RoI pooling, do crop and resize
         with tf.variable_scope("crop_and_resize") as scope:
             batch_ids = tf.squeeze(tf.slice(rois, [0, 0], [-1, 1], name="batch_id"), [1])
             # Get the normalized coordinates of bboxes
             feature_shape = tf.shape(features)
-            height = (tf.to_float(feature_shape[1]) - 1.) * np.float32(self._feat_stride[0])
-            width = (tf.to_float(feature_shape[2]) - 1.) * np.float32(self._feat_stride[0])
+            height = (tf.to_float(feature_shape[1]) - 1.) * np.float32(cfg.feat_stride)
+            width = (tf.to_float(feature_shape[2]) - 1.) * np.float32(cfg.feat_stride)
             x1 = tf.slice(rois, [0, 1], [-1, 1], name="x1") / width
             y1 = tf.slice(rois, [0, 2], [-1, 1], name="y1") / height
             x2 = tf.slice(rois, [0, 3], [-1, 1], name="x2") / width
             y2 = tf.slice(rois, [0, 4], [-1, 1], name="y2") / height
             # Won't be backpropagated to rois anyway, but to save time
             bboxes = tf.stop_gradient(tf.concat([y1, x1, y2, x2], 1))
-            crops = tf.image.crop_and_resize(features, bboxes, tf.to_int32(batch_ids), [cfg.pooling_sizes, cfg.pooling_sizes],
+            crops = tf.image.crop_and_resize(features,
+                                             bboxes,
+                                             tf.to_int32(batch_ids),
+                                             [cfg.pooling_size, cfg.pooling_size],
                                              name="crops")
 
         # last conv block for resnet
         with argscope(Conv2D, nl=tf.identity, use_bias=False,
                       W_init=variance_scaling_initializer(mode='FAN_OUT')), \
                 argscope([Conv2D, MaxPooling, GlobalAvgPooling, BatchNorm], data_format='NHWC'):
-            features = (LinearWrap(features)
+            features = (LinearWrap(crops)
                         .apply(layer, 'group3', block_func, 512, defs[3], 1)
                         .BNReLU('bnlast')
                         .GlobalAvgPooling('gap')())
 
         # outputs
-        cls_score = FullyConnected("cls_score", cfg.n_classes, nl=tf.identity)
-        bbox_pred = FullyConnected("bbox_pred", cfg.n_classes * 4, nl=tf.identity)
+        cls_score = FullyConnected("cls_score", features, cfg.n_classes, nl=tf.identity)
+        bbox_pred = FullyConnected("bbox_pred", features, cfg.n_classes * 4, nl=tf.identity)
 
         cross_entropy = tf.reduce_mean(
             tf.nn.sparse_softmax_cross_entropy_with_logits(
-                logits=tf.reshape(cls_score, [-1, cfg.n_classes]), labels=label))
+                logits=tf.reshape(cls_score, [-1, cfg.n_classes]), labels=labels))
 
-        bbox_label = tf.tile(label, [4])
+        bbox_label = tf.tile(labels, [4])
         bbox_label = tf.reshape(bbox_label, (-1, 4))
         bbox_label = tf.cast(bbox_label > 0, tf.float32)
-        loss_box = self._smooth_l1_loss(bbox_pred, bbox_targets, bbox_label=bbox_label)
+        loss_box = self._smooth_l1_loss(bbox_pred, bbox_targets, bbox_label=bbox_inside_weights)
 
         loss = rpn_loss_box + rpn_cross_entropy + loss_box + cross_entropy
 
@@ -263,7 +281,7 @@ def get_data(train_or_test):
         augmentors = [
             imgaug.ToUint8()
         ]
-    ds = AugmentImageComponent(ds, augmentors)
+    # ds = AugmentImageComponent(ds, augmentors)
     if isTrain:
         ds = PrefetchDataZMQ(ds, min(6, multiprocessing.cpu_count()))
     # ds = BatchData(ds, BATCH_SIZE, remainder=not isTrain)
@@ -304,5 +322,5 @@ if __name__ == '__main__':
     config = get_config()
     if args.load:
         config.session_init = get_model_loader(args.load)
-    config.nr_tower = NR_GPU
+    config.nr_tower = 1
     SyncMultiGPUTrainer(config).train()

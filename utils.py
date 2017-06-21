@@ -247,8 +247,8 @@ def proposal_target_layer(rpn_rois, rpn_scores, gt_boxes, gt_classes):
     rois = rois.reshape(-1, 5)
     roi_scores = roi_scores.reshape(-1)
     labels = labels.reshape(-1, 1)
-    bbox_targets = bbox_targets.reshape(-1, _num_classes * 4)
-    bbox_inside_weights = bbox_inside_weights.reshape(-1, _num_classes * 4)
+    bbox_targets = bbox_targets.reshape(-1, cfg.n_classes * 4)
+    bbox_inside_weights = bbox_inside_weights.reshape(-1, cfg.n_classes * 4)
     bbox_outside_weights = np.array(bbox_inside_weights > 0).astype(np.float32)
 
     return rois, roi_scores, labels, bbox_targets, bbox_inside_weights, bbox_outside_weights

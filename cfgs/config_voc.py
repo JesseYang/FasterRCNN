@@ -3,6 +3,8 @@ from easydict import EasyDict as edict
 
 cfg = edict()
 
+cfg.depth = 101
+
 cfg.target_size = 600
 cfg.feat_stride = 16
 
