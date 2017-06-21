@@ -15,7 +15,7 @@ from tensorpack.tfutils.summary import *
 from reader import *
 from cfgs.config import cfg
 
-from utils import proposal_layer
+from utils import proposal_layer, proposal_target_layer
 
 class Model(ModelDesc):
 
@@ -32,40 +32,31 @@ class Model(ModelDesc):
         # 5. pay attention that target for fast rcnn part cannot be provided,
         #    since they are calculated based on the rpn output
         #    (selecting positive and negative samples from roi, which is output of rpn)
+        # 6. pay attention that the network only supports one image each time
         return [InputDesc(tf.uint8, [1, None, None, 3], 'image'),
                 InputDesc(tf.int32, [2], 'img_shape'),
                 InputDesc(tf.int32, [None, 4], 'gt_boxes'),
                 InputDesc(tf.int32, [None], 'gt_classes'),
                 InputDesc(tf.int32, [1, None, None, cfg.anchor_num], 'rpn_label'),
-                InputDesc(tf.int32, [1, None, None, cfg.anchor_num, 4], 'rpn_bbox_targets')]
+                InputDesc(tf.int32, [1, None, None, cfg.anchor_num, 4], 'rpn_bbox_targets'),
+                InputDesc(tf.uint8, [None, 4], "anchors")]
 
-    def _proposal_layer(self, rpn_class_prob, rpn_bbox_pred, name):
-        with tf.variable_scope(name) as scope:
-            rois, rpn_scores = tf.py_func(proposal_layer,
-                                          [rpn_cls_prob, rpn_bbox_pred, self.img_shape],
-                                          [tf.float32, tf.float32])
-            rois.set_shape([None, 5])
-            rpn_scores.set_shape([None, 1])
-
-        return rois, rpn_scores
-
-    def _smooth_l1_loss(self, bbox_pred, bbox_targets, sigma=1.0, dim=[1]):
+    def _smooth_l1_loss(self, bbox_pred, bbox_targets, bbox_label, sigma=1.0, dim=[1]):
         sigma_2 = sigma ** 2
         box_diff = bbox_pred - bbox_targets
-        in_box_diff = cfg.bbox_inside_weights * box_diff
-        abs_in_box_diff = tf.abs(in_box_diff)
-        smoothL1_sign = tf.stop_gradient(tf.to_float(tf.less(abs_in_box_diff, 1. / sigma_2)))
-        in_loss_box = tf.pow(in_box_diff, 2) * (sigma_2 / 2.) * smoothL1_sign + \
-                      (abs_in_box_diff - (0.5 / sigma_2)) * (1. - smoothL1_sign)
-        out_loss_box = cfg.bbox_outside_weights * in_loss_box
+        box_diff = bbox_label * box_diff
+        abs_box_diff = tf.abs(box_diff)
+        smoothL1_sign = tf.stop_gradient(tf.to_float(tf.less(abs_box_diff, 1. / sigma_2)))
+        loss_box = tf.pow(box_diff, 2) * (sigma_2 / 2.) * smoothL1_sign \
+                      + (abs_box_diff - (0.5 / sigma_2)) * (1. - smoothL1_sign)
         loss_box = tf.reduce_mean(tf.reduce_sum(
-            out_loss_box,
+            loss_box,
             axis=dim
         ))
         return loss_box
 
     def _build_graph(self, inputs):
-        image, height, width, gt_boxes, gt_classes, rpn_label, rpn_bbox_targets = inputs
+        image, height, width, gt_boxes, gt_classes, rpn_label, rpn_bbox_targets, anchors = inputs
         image = tf.cast(image, tf.float32) * (1.0 / 255)
 
         # Wrong mean/std are used for compatibility with pre-trained models.
@@ -150,6 +141,8 @@ class Model(ModelDesc):
                                channel=cfg.anchor_num * 2,
                                kernel_shape=1,
                                'VALID')
+        # from 1 x feat_height x feat_width x (2 x anchor_num) to (feat_height x feat_width x anchor_num) x 2
+        rpn_cls_score = tf.reshape(rpn_cls_score, [-1, 2])
 
         rpn_cls_prob = tf.nn.softmax(rpn_cls_score, name='rpn_cls_prob', dim=1)
         rpn_bbox_pred = Conv2D("rpn_bbox_pred",
@@ -157,12 +150,41 @@ class Model(ModelDesc):
                                channel=cfg.anchor_num * 4,
                                kernel_shape=1,
                                'VALID')
+        _, feat_height, feat_width, _ = tf.shape(rpn_bbox_pred)
+        # from 1 x feat_height x feat_width x (4 x anchor_num) to 1 x feat_height x feat_width x anchor_num x 4
+        rpn_bbox_pred = tf.reshape(rpn_bbox_pred, [1, feat_height, feat_width, cfg.anchor_num, 4])
 
+        rpn_select = tf.where(tf.not_equal(rpn_label, -1))
+
+        # only select the pred boxes that corresponds to positive and nagative anchors
+        rpn_cls_score = tf.reshape(tf.gather(rpn_cls_score, rpn_select), [-1, 2])
+        rpn_cls_label = tf.reshape(tf.gather(rpn_label, rpn_select), [-1])
+
+        # the class loss for rpn
         rpn_cross_entropy = tf.reduce_mean(
-            tf.nn.sparse_softmax_cross_entropy_with_logits(logits=rpn_cls_score, labels=rpn_label))
+            tf.nn.sparse_softmax_cross_entropy_with_logits(logits=rpn_cls_score, labels=rpn_cls_label))
 
-        rpn_loss_box = self._smooth_l1_loss(rpn_bbox_pred, rpn_bbox_targets, rpn_bbox_inside_weights,
-                                            rpn_bbox_outside_weights, sigma=sigma_rpn, dim=[1, 2, 3])
+        # the box loss for rpn
+        rpn_bbox_label = tf.tile(rpn_label, [1, 1, 1, 4])
+        rpn_bbox_label = tf.reshape(rpn_bbox_label, (1, feat_height, feat_width, cfg.anchor_num, 4))
+        rpn_bbox_label = tf.cast(rpn_bbox_label == 1, tf.float32)
+        rpn_loss_box = self._smooth_l1_loss(rpn_bbox_pred, rpn_bbox_targets, rpn_bbox_label, sigma=sigma_rpn, dim=[1, 2, 3, 4])
+        rpn_loss_box = rpn_loss_box / cfg.rpn_reg_weight
+
+        # get roi proposals
+        with tf.variable_scope("rois") as scope:
+            rois, rpn_scores = tf.py_func(proposal_layer,
+                                          [rpn_cls_prob, rpn_bbox_pred, height, width, anchors],
+                                          [tf.float32, tf.float32])
+        rois.set_shape([None, 4])
+        rpn_scores.set_shape([None, 1])
+
+        # sample from roi proposals to get targets for fast rcnn part
+        with tf.variable_scope(name) as scope:
+            rois, roi_scores, labels, bbox_targets, bbox_inside_weights, bbox_outside_weights = tf.py_func(
+                proposal_target_layer,
+                [rois, roi_scores, gt_boxes, gt_classes],
+                [tf.float32, tf.float32, tf.float32, tf.float32, tf.float32, tf.float32])
 
         # rois, roi_scores = self._proposal_layer(rpn_cls_prob, rpn_bbox_pred, "rois")
 

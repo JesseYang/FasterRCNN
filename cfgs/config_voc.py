@@ -18,7 +18,20 @@ cfg.anchor_scales = (8, 16, 32)
 cfg.anchor_ratios = (0.5, 1, 2)
 cfg.anchor_num = 9
 
-cfg.rpn_bbox_inside_weights = (1.0, 1.0, 1.0, 1.0)
+cfg.rpn_reg_weight = 1 / cfg.rpn_batch
+
+cfg.pre_nms_topN = 12000
+cfg.post_nms_topN = 2000
+
+cfg.rpn_nms_th = 0.7
+
+cfg.rcnn_batch_size = 128
+cfg.rcnn_fg_frac = 0.25
+
+cfg.fg_iou_th = 0.5
+
+cfg.bg_iou_hi = 0.5
+cfg.bg_iou_lo = 0.1
 
 cfg.n_classes = 20
 
