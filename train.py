@@ -15,6 +15,8 @@ from tensorpack.tfutils.summary import *
 from reader import *
 from cfgs.config import cfg
 
+import pdb
+
 from utils import proposal_layer, proposal_target_layer
 
 class Model(ModelDesc):
@@ -76,7 +78,7 @@ class Model(ModelDesc):
                 return l
 
         def basicblock(l, ch_out, stride, preact):
-            ch_in = l.get_shape().as_list()[1]
+            ch_in = l.get_shape().as_list()[3]
             if preact == 'both_preact':
                 l = BNReLU('preact', l)
                 input = l
@@ -90,7 +92,7 @@ class Model(ModelDesc):
             return l + shortcut(input, ch_in, ch_out, stride)
 
         def bottleneck(l, ch_out, stride, preact):
-            ch_in = l.get_shape().as_list()[1]
+            ch_in = l.get_shape().as_list()[3]
             if preact == 'both_preact':
                 l = BNReLU('preact', l)
                 input = l
@@ -159,11 +161,15 @@ class Model(ModelDesc):
         # from 1 x feat_height x feat_width x (4 x anchor_num) to 1 x feat_height x feat_width x anchor_num x 4
         rpn_bbox_pred = tf.reshape(rpn_bbox_pred, [1, feat_height, feat_width, cfg.anchor_num, 4])
 
-        rpn_select = tf.where(tf.not_equal(rpn_label, -1))
+        rpn_cls_label = tf.reshape(rpn_label, [-1])
+
+        rpn_select = tf.where(tf.not_equal(rpn_cls_label, -1))
 
         # only select the pred boxes that corresponds to positive and nagative anchors
-        rpn_cls_score = tf.reshape(tf.gather(rpn_cls_score, rpn_select), [-1, 2])
-        rpn_cls_label = tf.reshape(tf.gather(rpn_label, rpn_select), [-1])
+        # rpn_cls_label = tf.reshape(tf.gather(rpn_label, rpn_select), [-1])
+        rpn_cls_label = tf.gather_nd(rpn_cls_label, rpn_select)
+        # rpn_cls_score = tf.reshape(tf.gather(rpn_cls_score, rpn_select), [-1, 2])
+        rpn_cls_score = tf.gather_nd(rpn_cls_score, rpn_select)
 
         # the class loss for rpn
         rpn_cross_entropy = tf.reduce_mean(
@@ -199,7 +205,6 @@ class Model(ModelDesc):
         bbox_outside_weights.set_shape([cfg.rcnn_batch_size, cfg.n_classes * 4])
 
         labels = tf.to_int32(labels, name="to_int32")
-
 
         # instead of doing RoI pooling, do crop and resize
         with tf.variable_scope("crop_and_resize") as scope:

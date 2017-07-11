@@ -2,6 +2,8 @@ import numpy as np
 
 from cfgs.config import cfg
 
+import pdb
+
 
 def bbox_transform(ex_rois, gt_rois):
     ex_widths = ex_rois[:, 2] - ex_rois[:, 0] + 1.0
@@ -209,8 +211,8 @@ def proposal_layer(rpn_cls_prob, rpn_bbox_pred, height, width, anchors):
     order = scores.argsort()[::-1]
     if cfg.pre_nms_topN > 0:
         order = order[:cfg.pre_nms_topN]
-    proposals = proposals[order, :]
-    scores = scores[order]
+    proposals = proposals[order[:,0], :]
+    scores = scores[order[:,0]]
 
     # Non-maximal suppression
     keep = nms(np.hstack((proposals, scores)), cfg.rpn_nms_th)
@@ -306,3 +308,17 @@ def _sample_rois(all_rois, all_scores, gt_boxes, gt_classes, fg_rois_per_image, 
     bbox_targets, bbox_inside_weights = _get_bbox_regression_labels(bbox_target_data, num_classes)
 
     return labels, rois, roi_scores, bbox_targets, bbox_inside_weights
+
+
+if __name__ == "__main__":
+    height = 600
+    width = 800
+    feat_height = int(np.ceil(height / cfg.feat_stride))
+    feat_width = int(np.ceil(width / cfg.feat_stride))
+    rpn_cls_prob = np.random.rand(feat_height * feat_width * cfg.anchor_num, 2)
+    rpn_bbox_pred = np.random.rand(1, feat_height, feat_width, cfg.anchor_num, 4)
+
+    anchors = np.random.rand(feat_height * feat_width * cfg.anchor_num, 4)
+
+    proposals, scores = proposal_layer(rpn_cls_prob, rpn_bbox_pred, height, width, anchors)
+

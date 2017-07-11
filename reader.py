@@ -245,4 +245,8 @@ class Data(RNGDataFlow):
             yield self.generate_sample(k)
 
 if __name__ == '__main__':
-    pass
+    filename_list = ["voc_2007_train.txt"]
+    ds = Data(filename_list, shuffle=True, flip=True)
+    ds.reset_state()
+    data_producer = ds.get_data()
+    dp = next(data_producer)
