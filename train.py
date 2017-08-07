@@ -219,11 +219,21 @@ class Model(ModelDesc):
             y2 = tf.slice(rois, [0, 4], [-1, 1], name="y2") / height
             # Won't be backpropagated to rois anyway, but to save time
             bboxes = tf.stop_gradient(tf.concat([y1, x1, y2, x2], 1))
+            # features = tf.stop_gradient(features)
             crops = tf.image.crop_and_resize(features,
                                              bboxes,
                                              tf.to_int32(batch_ids),
                                              [cfg.pooling_size, cfg.pooling_size],
                                              name="crops")
+
+        ##### debug #####
+        # import pdb
+        # pdb.set_trace()
+        # crops = tf.stop_gradient(crops)
+        temp = tf.reduce_mean(crops)
+        self.cost = tf.reduce_mean(rpn_loss_box) + temp
+        return
+        #################
 
         # last conv block for resnet
         with argscope(Conv2D, nl=tf.identity, use_bias=False,

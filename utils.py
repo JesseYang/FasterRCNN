@@ -194,6 +194,8 @@ def proposal_layer(rpn_cls_prob, rpn_bbox_pred, height, width, anchors):
          For details please see the technical report
     """
 
+    pdb.set_trace()
+
     # rpn_cls_prob: (feat_height x feat_width x anchor_num) x 2
     # rpn_bbox_pred: 1 x feat_height x feat_width x anchor_num x 4
 
@@ -230,6 +232,8 @@ def proposal_target_layer(rpn_rois, rpn_scores, gt_boxes, gt_classes):
     Assign object detection proposals to ground-truth targets. Produces proposal
     classification labels and bounding-box regression targets.
     """
+
+    pdb.set_trace()
 
     # Proposal ROIs (x1, y1, x2, y2) coming from RPN
     all_rois = rpn_rois
@@ -291,7 +295,6 @@ def _sample_rois(all_rois, all_scores, gt_boxes, gt_classes, fg_rois_per_image, 
         bg_inds = npr.choice(bg_inds, size=int(rois_per_image), replace=to_replace)
         fg_rois_per_image = 0
     else:
-        import pdb
         pdb.set_trace()
 
     # The indices that we're selecting (both fg and bg)
